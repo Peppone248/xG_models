@@ -1,19 +1,75 @@
-from datetime import time
+"""
+01_extract_shots.py — Estrarre i tiri dalla Serie A (StatsBomb open data)
+=========================================================================
 
-from statsbombpy import sb
+StatsBomb organizza i dati su 3 livelli:
+    Competitions → Matches → Events
+
+Per arrivare ai tiri, navighiamo questa gerarchia dall'alto verso il basso.
+
+Requisiti:
+    pip install statsbombpy pandas
+"""
+
 import pandas as pd
+from statsbombpy import sb
+import warnings
+import time
+import requests
 
-pd.set_option('display.max_columns', None)
-pd.set_option('display.max_rows', None)
+warnings.filterwarnings("ignore")
+
+# ============================================================
+# FIX: FORZARE UN TIMEOUT SULLE RICHIESTE HTTP
+# ============================================================
+# statsbombpy usa requests.get() senza timeout.
+# Senza timeout, una richiesta che non riceve risposta resta appesa
+# per sempre — il nostro retry non scatta mai perché non c'è eccezione.
+#
+# Soluzione: "monkey-patch" di requests.get() per aggiungere un timeout
+# di default. Così ogni richiesta che non risponde entro 30 secondi
+# lancia un'eccezione ReadTimeout, che il nostro retry gestisce.
+#
+# Questo è un pattern comune in data engineering: quando una libreria
+# esterna non gestisce i timeout, li forzi dall'esterno.
+
+_original_get = requests.get
+
+def _get_with_timeout(*args, **kwargs):
+    kwargs.setdefault("timeout", 30)  # 30 secondi massimo
+    return _original_get(*args, **kwargs)
+
+requests.get = _get_with_timeout
+
+# ============================================================
+# LIVELLO 1: COMPETITIONS
+# ============================================================
+# sb.competitions() restituisce TUTTE le competizioni disponibili.
+# Ogni riga è una combinazione (competizione, stagione).
+# I due campi chiave sono:
+#   - competition_id: identifica il campionato (es. 12 = Serie A)
+#   - season_id: identifica la stagione (es. 27 = 2015/16)
+# Insieme, formano la "chiave" per accedere ai match di quella stagione.
+
 comps = sb.competitions()
-print(f"Competizioni totali: {comps[['competition_id', 'competition_name']]}")
+print(f"Competizioni totali disponibili: {len(comps)}")
 
-champions_league = comps[comps["competition_name"] == "Champions League"]
-print(f"\nChampions League disponibile:")
-print(champions_league[["competition_id", "season_id", "season_name"]].to_string(index=False))
+# Cerchiamo la Serie A
+serie_a = comps[comps["competition_name"] == "Serie A"]
+print(f"\nSerie A disponibile:")
+print(serie_a[["competition_id", "season_id", "season_name"]].to_string(index=False))
 
-COMPETITION_ID = 2
+# Output atteso:
+#   competition_id  season_id  season_name
+#               12         27    2015/2016
+#               12         86    1986/1987
+#
+# Abbiamo solo 2015/16 come stagione moderna utilizzabile.
+# Segniamoci gli ID:
+
+COMPETITION_ID = 12
 SEASON_ID = 27
+
 
 # ============================================================
 # LIVELLO 2: MATCHES
@@ -22,9 +78,11 @@ SEASON_ID = 27
 # e restituisce un DataFrame con una riga per partita.
 # Il campo chiave qui è match_id: ci servirà per scaricare gli eventi.
 
-matches = sb.matches(COMPETITION_ID, SEASON_ID)
+matches = sb.matches(competition_id=COMPETITION_ID, season_id=SEASON_ID)
 print(f"\nPartite nella stagione: {len(matches)}")
 
+# Vediamo cosa contiene ogni partita
+print(f"\nEsempio — prima partita:")
 first = matches.iloc[0]
 print(f"  match_id:  {first['match_id']}")
 print(f"  data:      {first['match_date']}")
@@ -33,16 +91,25 @@ print(f"  trasferta: {first['away_team']}")
 print(f"  risultato: {first['home_score']}-{first['away_score']}")
 print(f"  giornata:  {first['match_week']}")
 
+
 # ============================================================
 # LIVELLO 3: EVENTS (prima una sola partita)
 # ============================================================
+# sb.events() prende un match_id e restituisce TUTTI gli eventi:
+# passaggi, tiri, falli, contrasti, ecc.
+# Noi filtriamo solo type == "Shot".
+#
+# REGOLA: quando costruisci una pipeline, testa sempre su UN elemento
+# prima di fare il loop su tutti. Così trovi errori subito.
 
 events = sb.events(match_id=first["match_id"])
 print(f"\nEventi totali nella partita: {len(events)}")
 
+# Quanti tiri?
 shots = events[events["type"] == "Shot"]
 print(f"Di cui tiri: {len(shots)}")
 
+# Guardiamo UN tiro per capire la struttura
 print(f"\n--- Anatomia di un tiro ---")
 one_shot = shots.iloc[0]
 print(f"  Giocatore:      {one_shot['player']}")
@@ -54,24 +121,36 @@ print(f"  Tipo:           {one_shot['shot_type']}")
 print(f"  Esito:          {one_shot['shot_outcome']}")
 print(f"  xG StatsBomb:   {one_shot['shot_statsbomb_xg']:.4f}")
 
+# La posizione è una lista [x, y] nel sistema di coordinate StatsBomb:
+#   - Campo: 120 x 80 yards
+#   - Origine (0,0): angolo in basso a sinistra
+#   - Porta attaccata: x = 120, centrata a y = 40
 print(f"\n  → x = {one_shot['location'][0]} (distanza dalla propria porta)")
 print(f"  → y = {one_shot['location'][1]} (posizione laterale, centro = 40)")
+
 
 # ============================================================
 # 4. ESTRARRE TUTTI I TIRI DELLA STAGIONE
 # ============================================================
+# Ora che sappiamo che funziona su una partita, facciamo il loop su tutte.
+# Per ogni partita:
+#   1. Carichiamo gli eventi
+#   2. Filtriamo i tiri
+#   3. Aggiungiamo info di contesto (giornata, squadre, data)
+#   4. Li accumuliamo in una lista
+#
 # PROBLEMA PRATICO: statsbombpy scarica i dati da GitHub.
 # Con 380 richieste consecutive, alcune possono andare in timeout.
 # Soluzione: retry con attesa crescente (exponential backoff).
 # Questo è un pattern standard in data engineering per qualsiasi
 # pipeline che dipende da un servizio esterno.
 
-MAX_RETRIES = 5  # Quanti tentativi prima di arrendersi
-BASE_WAIT = 3  # Secondi di attesa al primo retry
+MAX_RETRIES = 5       # Quanti tentativi prima di arrendersi
+BASE_WAIT = 3         # Secondi di attesa al primo retry
 
-print(f"\n{'=' * 50}")
+print(f"\n{'='*50}")
 print(f"Estrazione tiri da {len(matches)} partite...")
-print(f"{'=' * 50}")
+print(f"{'='*50}")
 
 all_shots = []
 failed_matches = []
@@ -125,11 +204,13 @@ if failed_matches:
 df = pd.concat(all_shots, ignore_index=True)
 print(f"\nEstrazione completata: {len(df)} tiri da {df['match_id'].nunique()} partite")
 
+
 # ============================================================
 # 5. SELEZIONARE LE COLONNE RILEVANTI
 # ============================================================
 # Il DataFrame contiene colonne per TUTTI i tipi di evento (passaggi, ecc.)
 # La maggior parte sono NaN per i tiri. Teniamo solo quelle utili.
+
 KEEP = [
     # Contesto partita
     "match_id", "match_date", "match_week", "home_team", "away_team",
@@ -151,6 +232,7 @@ KEEP = [
 keep_existing = [c for c in KEEP if c in df.columns]
 df = df[keep_existing].copy()
 
+
 # ============================================================
 # 6. ESTRARRE X e Y dalla colonna location
 # ============================================================
@@ -160,9 +242,13 @@ df = df[keep_existing].copy()
 df["shot_x"] = df["location"].apply(lambda loc: loc[0] if isinstance(loc, list) else None)
 df["shot_y"] = df["location"].apply(lambda loc: loc[1] if isinstance(loc, list) else None)
 
+
 # ============================================================
 # 7. SALVARE
 # ============================================================
+# CSV: universale, ma non può contenere il freeze_frame (lista di dict)
+# Pickle: preserva tutti i tipi Python, ma leggibile solo da pandas
+
 csv_cols = [c for c in df.columns if c not in ["location", "shot_freeze_frame"]]
 df[csv_cols].to_csv("serie_a_shots.csv", index=False)
 
@@ -172,9 +258,13 @@ print(f"\nFile salvati:")
 print(f"  serie_a_shots.csv  — {len(df)} righe (senza freeze frame)")
 print(f"  serie_a_shots.pkl  — {len(df)} righe (completo)")
 
-print(f"\n{'=' * 50}")
+
+# ============================================================
+# 8. VERIFICA RAPIDA
+# ============================================================
+print(f"\n{'='*50}")
 print(f"RIEPILOGO DATASET")
-print(f"{'=' * 50}")
+print(f"{'='*50}")
 print(f"Tiri totali:     {len(df)}")
 print(f"Partite:         {df['match_id'].nunique()}")
 print(f"Giocatori:       {df['player'].nunique()}")
