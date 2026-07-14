@@ -18,8 +18,10 @@ df = pd.read_csv("shots_featured.csv")
 print(f"Caricato: {len(df)} tiri, {len(df.columns)} colonne")
 
 FEATURES = [
-    "distance",
-    "angle",
+    #"distance",
+    "log_distance",
+    #"angle",
+    "log_angle",
     "is_one_on_one",
     "is_first_shot",
     "is_under_pressure",
@@ -30,9 +32,10 @@ FEATURES = [
     #"type_Open Play",
     "type_Free Kick",
     "technique_Normal",
-    "technique_Half Volley",
+    #"technique_Half Volley",
     "technique_Volley",
-    "technique_Backheel",
+    #"technique_Backheel",
+    "centrality"
 ]
 
 
@@ -103,5 +106,21 @@ plt.tight_layout()
 plt.savefig("calibration_plot.png", dpi=150)
 plt.show()
 
-calibration.columns = ["actual_goal_rate", "predicted_xg", "n_shots"]
+calibration.columns = ["predicted_xg", "actual_goal_rate", "n_shots"]
 print(calibration)
+
+# --- Coefficienti ---
+# Ogni coefficiente dice: "se questa feature aumenta di 1 unità,
+# di quanto cambia il log-odds di segnare?"
+
+coef_df = pd.DataFrame({
+    "feature": FEATURES,
+    "coefficient": model.coef_[0]
+}).sort_values("coefficient", ascending=False)
+
+print("Intercetta:", model.intercept_[0])
+print()
+print(coef_df.to_string(index=False))
+
+calibration.to_csv('calibration_centrality.txt', sep='\t', index=False)
+coef_df.to_csv('coef_centrality.txt', sep='\t', index=False)

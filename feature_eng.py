@@ -6,6 +6,20 @@ import numpy as np
 GOAL_X = 120
 POST_A_Y = 36
 POST_B_Y = 44
+columns_to_drop = {
+"player_id",
+    "body_Right Foot",
+    "technique_Overhead Kick",
+    "technique_Backheel",
+    "second",
+    "period",
+    "match_id",
+    "minute",
+    "technique_Diving Header",
+    "type_Open Play",
+    "technique_Lob"
+}
+
 pd.set_option('display.max_columns', None)
 
 df = pd.read_csv(r'C:\Users\giuse\PycharmProjects\xG_models\serie_a_shots.csv')
@@ -62,7 +76,18 @@ for col in ["shot_x", "shot_y"]:
 df["distance"] = np.sqrt((120 - df["shot_x"])**2 + (40 - df["shot_y"])**2)
 # angles between shooters and spot
 df["angle"] = np.abs(np.degrees(angle_b - angle_a))
-df.drop(columns={"second", "period", "match_id", "minute"}, inplace=True)
+df["log_distance"] = np.log(df["distance"])
+df["log_angle"] = np.log(df["angle"] + 1)
+
+# interactions features - combined features to match football situations
+df["angle_x_header"] = df["angle"] * df["body_Head"]
+df["distance_x_pressure"] = df["distance"] * df["is_under_pressure"]
+
+# measure to frame how centrale the shot is --- LOWER CENTRALITY = More central shot = better chance!
+df["centrality"] = abs(df["shot_y"] - 40)
+
+df.drop(columns=columns_to_drop, inplace=True)
+plt.figure(figsize=(12, 10))
 corr_matrix = df.corr(numeric_only=True)
 sn.heatmap(corr_matrix, cmap='coolwarm', annot=True)
 plt.show()
@@ -70,7 +95,6 @@ plt.show()
 print(df.groupby(pd.cut(df["angle"], bins=[0, 5, 10, 20, 30, 90]))["is_goal"].agg(["count", "mean"]))
 print(df.groupby(pd.cut(df["distance"], bins=[0, 8, 12, 18, 25, 45]))["is_goal"].agg(["count", "mean"]))
 print(df.groupby("shot_technique")["is_goal"].agg(["count", "mean"]))
-
 
 train = df[df["match_week"] <= 31].copy()
 test = df[df["match_week"] > 31].copy()
