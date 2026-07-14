@@ -9,9 +9,11 @@ Volley            705  0.106383
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
+from xG_visualization import XGVisualizer
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from mplsoccer import Pitch
 
 
 df = pd.read_csv("shots_featured.csv")
@@ -122,5 +124,9 @@ print("Intercetta:", model.intercept_[0])
 print()
 print(coef_df.to_string(index=False))
 
-calibration.to_csv('calibration_centrality.txt', sep='\t', index=False)
-coef_df.to_csv('coef_centrality.txt', sep='\t', index=False)
+viz = XGVisualizer(test)  # or df for all data
+viz.shot_map(save_path="shot_map.png")
+viz.shot_map_xg(xg_column="xg_pred", save_path="xg_map.png")
+viz.xg_distribution(save_path="xg_distr.png")
+viz.goal_rate_heatmap(save_path="goal_rate_heatmap.png")
+viz.calibration_plot(y_pred_test, y_test)
